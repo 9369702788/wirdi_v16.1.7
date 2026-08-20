@@ -1,0 +1,74 @@
+name: Build Wirdi Test APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: false
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Generate Android platform folder
+        run: flutter create --platforms=android --org com.wirdi --project-name wirdi .
+
+      - name: Patch AndroidManifest.xml
+        run: |
+          python3 patch_manifest.py
+
+      - name: Create network_security_config.xml
+        run: |
+          mkdir -p android/app/src/main/res/xml
+          cp network_security_config.xml android/app/src/main/res/xml/network_security_config.xml
+
+      - name: Patch Android Gradle for core library desugaring
+        run: |
+          python3 patch_gradle.py
+
+      - name: Clear Flutter Cache
+        run: flutter pub cache clean --force || true
+
+      - name: Remove Old Lock File
+        run: rm -f pubspec.lock
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Show Dependencies
+        run: flutter pub deps
+
+      - name: Analyze
+        run: flutter analyze || true
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wirdi-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
