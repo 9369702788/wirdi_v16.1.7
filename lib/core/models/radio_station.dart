@@ -32,15 +32,19 @@ class RadioStation {
   }
 
   factory RadioStation.fromUthumany(Map<String, dynamic> j) {
-    final name = j['name'] as String? ?? '';
+    final name = (j["name"] as String?) ?? "";
+    final safeId = name.toLowerCase()
+        .replaceAll(" ", "_")
+        .replaceAll(RegExp("[^a-z0-9_]"), "");
     return RadioStation(
-      id: 'ut_\${name.toLowerCase().replaceAll(' ', '_').replaceAll(RegExp(r'[^a-z0-9_]'), '')}',
-      nameAr: name, nameEn: name,
-      streamUrl: j['stream_url'] as String? ?? '',
+      id: "ut_$safeId",
+      nameAr: name,
+      nameEn: name,
+      streamUrl: (j["stream_url"] as String?) ?? "",
       country: _guessCountry(name),
       countryCode: _guessCountryCode(name),
       category: _guessCategory(name),
-      isOfficial: name.contains('إذاعة'),
+      isOfficial: name.contains("إذاعة"),
     );
   }
 

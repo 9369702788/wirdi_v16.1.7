@@ -8,13 +8,12 @@ import '../models/radio_station.dart';
 import '../data/radio_stations.dart';
 
 enum RadioState { stopped, loading, playing, error }
-enum RadioSource { fallback, dataRosy, uthumany, islamicApp }
 
 class RadioService extends ChangeNotifier {
   RadioService._();
   static final RadioService instance = RadioService._();
 
-  final AudioPlayer _player = AudioPlayer();
+  AudioPlayer _player = AudioPlayer();
   RadioState _state = RadioState.stopped;
   RadioStation? _currentStation;
   String? _errorMessage;
@@ -23,44 +22,39 @@ class RadioService extends ChangeNotifier {
   int? _sleepMinutesRemaining;
   Set<String> _favoriteIds = {};
   bool _initialized = false;
-  List<RadioStation> _stations = kFallbackStations;
-  bool _loadingStations = false;
-  RadioSource _activeSource = RadioSource.fallback;
+  List<RadioStation> _liveStations = [];
+  bool _loadingLive = false;
+  String _sourceLabel = '';
 
   static const _favsKey = 'radio_favorites';
 
-  RadioState get state             => _state;
+  RadioState get state => _state;
   RadioStation? get currentStation => _currentStation;
-  String? get errorMessage         => _errorMessage;
-  bool get isPlaying               => _state == RadioState.playing;
-  bool get isLoading               => _state == RadioState.loading;
-  int? get sleepMinutesRemaining   => _sleepMinutesRemaining;
-  bool get hasSleepTimer           => _sleepTimer != null;
-  bool get loadingStations         => _loadingStations;
-  RadioSource get activeSource     => _activeSource;
-  bool isFavorite(String id)       => _favoriteIds.contains(id);
-  List<RadioStation> get stations  => _stations;
-  List<RadioStation> get favoriteStations =>
-      _stations.where((s) => _favoriteIds.contains(s.id)).toList();
+  String? get errorMessage => _errorMessage;
+  bool get isPlaying => _state == RadioState.playing;
+  bool get isLoading => _state == RadioState.loading;
+  int? get sleepMinutesRemaining => _sleepMinutesRemaining;
+  bool get hasSleepTimer => _sleepTimer != null;
+  bool get loadingLive => _loadingLive;
+  String get sourceLabel => _sourceLabel;
+  bool isFavorite(String id) => _favoriteIds.contains(id);
 
-  String get sourceLabel {
-    switch (_activeSource) {
-      case RadioSource.dataRosy:   return 'data-rosy (verified Islamic)';
-      case RadioSource.uthumany:   return 'uthumany Islamic Radio API';
-      case RadioSource.islamicApp: return 'islamic.app Radio API';
-      case RadioSource.fallback:   return 'Built-in fallback';
-    }
-  }
+  List<RadioStation> get allStations =>
+      _liveStations.isNotEmpty ? _liveStations : kFallbackStations;
+
+  List<RadioStation> get favoriteStations =>
+      allStations.where((s) => _favoriteIds.contains(s.id)).toList();
 
   Future<void> init() async {
     if (_initialized) return;
     _initialized = true;
     await _loadFavorites();
     _player.onPlayerStateChanged.listen((ps) {
-      debugPrint('[Radio] PlayerState: \$ps');
       if (ps == PlayerState.playing) {
         _state = RadioState.playing;
-      } else if (ps == PlayerState.stopped || ps == PlayerState.completed) {
+      } else if (ps == PlayerState.stopped ||
+          ps == PlayerState.completed ||
+          ps == PlayerState.paused) {
         if (_state != RadioState.error) _state = RadioState.stopped;
       }
       notifyListeners();
@@ -68,89 +62,90 @@ class RadioService extends ChangeNotifier {
     _fetchStations();
   }
 
+  Future<void> refreshStations() => _fetchStations();
+
   Future<void> _fetchStations() async {
-    _loadingStations = true;
+    _loadingLive = true;
     notifyListeners();
-    if (await _tryDataRosy()) { _done(); return; }
-    if (await _tryUthumany()) { _done(); return; }
-    if (await _tryIslamicApp()) { _done(); return; }
-    _activeSource = RadioSource.fallback;
-    _done();
-  }
-
-  void _done() { _loadingStations = false; notifyListeners(); }
-
-  Future<bool> _tryDataRosy() async {
     try {
-      final r = await http.get(
+      // Tier 1: data-rosy.vercel.app — 18 curated Islamic stations
+      final r1 = await http.get(
         Uri.parse('https://data-rosy.vercel.app/radio.json'),
         headers: {'User-Agent': 'WirdiApp/1.51'},
       ).timeout(const Duration(seconds: 10));
-      if (r.statusCode == 200) {
-        final data = jsonDecode(r.body) as List;
-        final s = data.map((j) => RadioStation.fromDataRosy(j as Map<String, dynamic>))
-            .where((s) => s.streamUrl.isNotEmpty).toList();
-        if (s.isNotEmpty) { _stations = s; _activeSource = RadioSource.dataRosy; return true; }
+      if (r1.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(r1.body);
+        final stations = data
+            .map((j) => RadioStation.fromDataRosy(j as Map<String, dynamic>))
+            .where((s) => s.streamUrl.isNotEmpty)
+            .toList();
+        if (stations.isNotEmpty) {
+          _liveStations = stations;
+          _sourceLabel = 'data-rosy';
+          _loadingLive = false;
+          notifyListeners();
+          return;
+        }
       }
-    } catch (e) { debugPrint('[Radio] data-rosy failed: \$e'); }
-    return false;
-  }
-
-  Future<bool> _tryUthumany() async {
+    } catch (e) {
+      debugPrint('[RadioService] Tier 1 failed: $e');
+    }
     try {
-      final r = await http.get(
+      // Tier 2: uthumany Islamic Radio API (GitHub CDN)
+      final r2 = await http.get(
         Uri.parse('https://raw.githubusercontent.com/uthumany/radio-api/main/client/public/api/stations.json'),
         headers: {'User-Agent': 'WirdiApp/1.51'},
       ).timeout(const Duration(seconds: 10));
-      if (r.statusCode == 200) {
-        final decoded = jsonDecode(r.body);
-        final List data = decoded is List ? decoded
-            : (decoded is Map && decoded.containsKey('stations'))
-                ? decoded['stations'] as List : [];
-        final s = data.map((j) => RadioStation.fromUthumany(j as Map<String, dynamic>))
-            .where((s) => s.streamUrl.isNotEmpty).toList();
-        if (s.isNotEmpty) { _stations = s; _activeSource = RadioSource.uthumany; return true; }
+      if (r2.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(r2.body);
+        final stations = data
+            .map((j) => RadioStation.fromUthumany(j as Map<String, dynamic>))
+            .where((s) => s.streamUrl.isNotEmpty)
+            .toList();
+        if (stations.isNotEmpty) {
+          _liveStations = stations;
+          _sourceLabel = 'uthumany';
+          _loadingLive = false;
+          notifyListeners();
+          return;
+        }
       }
-    } catch (e) { debugPrint('[Radio] uthumany failed: \$e'); }
-    return false;
-  }
-
-  Future<bool> _tryIslamicApp() async {
+    } catch (e) {
+      debugPrint('[RadioService] Tier 2 failed: $e');
+    }
     try {
-      final r = await http.get(
-        Uri.parse('https://api.islamic.app/v1/radio/stations'),
-        headers: {'User-Agent': 'WirdiApp/1.51'},
-      ).timeout(const Duration(seconds: 10));
-      if (r.statusCode == 200) {
-        final decoded = jsonDecode(r.body);
-        final List data = decoded is List ? decoded
-            : (decoded is Map && decoded.containsKey('data'))
-                ? decoded['data'] as List : [];
-        final s = data.map((j) {
-          final m = j as Map<String, dynamic>;
-          return RadioStation(
-            id: 'ia_\${m["slug"] ?? m["id"] ?? ""}',
-            nameAr: m['name_ar'] as String? ?? m['name'] as String? ?? '',
-            nameEn: m['name'] as String? ?? '',
-            streamUrl: m['stream_url'] as String? ??
-                'https://api.islamic.app/v1/radio/stations/\${m["slug"]}/stream',
-            country: m['country'] as String? ?? 'International',
-            countryCode: m['country_code'] as String? ?? 'INT',
-            category: 'quran',
-            isOfficial: m['official'] as bool? ?? false,
-            imageUrl: m['logo_url'] as String? ?? m['image'] as String?,
-          );
-        }).where((s) => s.streamUrl.isNotEmpty).toList();
-        if (s.isNotEmpty) { _stations = s; _activeSource = RadioSource.islamicApp; return true; }
+      // Tier 3: radio-browser.info — quran tag, verified streams
+      final r3 = await http.get(
+        Uri.parse('https://de1.api.radio-browser.info/json/stations/search'
+            '?tag=quran&limit=30&hidebroken=true&order=votes&reverse=true'),
+        headers: {'User-Agent': 'WirdiApp/1.51', 'Accept': 'application/json'},
+      ).timeout(const Duration(seconds: 12));
+      if (r3.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(r3.body);
+        final stations = data
+            .map((j) => RadioStation.fromRadioBrowser(j as Map<String, dynamic>))
+            .where((s) => s.streamUrl.isNotEmpty)
+            .toList();
+        if (stations.isNotEmpty) {
+          _liveStations = stations;
+          _sourceLabel = 'radio-browser';
+          _loadingLive = false;
+          notifyListeners();
+          return;
+        }
       }
-    } catch (e) { debugPrint('[Radio] islamic.app failed: \$e'); }
-    return false;
+    } catch (e) {
+      debugPrint('[RadioService] Tier 3 failed: $e');
+    }
+    // Tier 4: built-in fallback
+    _liveStations = [];
+    _sourceLabel = 'fallback';
+    _loadingLive = false;
+    notifyListeners();
   }
-
-  Future<void> refreshStations() => _fetchStations();
 
   Future<void> play(RadioStation station) async {
-    debugPrint('[Radio] play: \${station.nameEn} -> \${station.streamUrl}');
+    debugPrint('[RadioService] play: ' + station.nameEn + ' -> ' + station.streamUrl);
     try {
       if (_currentStation?.id == station.id && isPlaying) return;
       _state = RadioState.loading;
@@ -160,11 +155,10 @@ class RadioService extends ChangeNotifier {
       await _player.stop();
       await _player.setReleaseMode(ReleaseMode.stop);
       await _player.play(UrlSource(station.streamUrl));
-    } catch (e, st) {
-      debugPrint('[Radio] play error: \$e
-\$st');
+    } catch (e) {
+      debugPrint('[RadioService] play error: ' + e.toString());
       _state = RadioState.error;
-      _errorMessage = 'Error: \$e';
+      _errorMessage = 'Error: ' + e.toString();
       notifyListeners();
     }
   }
@@ -178,15 +172,20 @@ class RadioService extends ChangeNotifier {
   }
 
   Future<void> togglePlay(RadioStation station) async {
-    if (_currentStation?.id == station.id && isPlaying) { await stop(); }
-    else { await play(station); }
+    if (_currentStation?.id == station.id && isPlaying) {
+      await stop();
+    } else {
+      await play(station);
+    }
   }
 
   void setSleepTimer(int minutes) {
     cancelSleepTimer();
     _sleepMinutesRemaining = minutes;
     _sleepTimer = Timer(Duration(minutes: minutes), () async {
-      await stop(); _sleepMinutesRemaining = null; notifyListeners();
+      await stop();
+      _sleepMinutesRemaining = null;
+      notifyListeners();
     });
     _sleepCountdown = Timer.periodic(const Duration(minutes: 1), (_) {
       if (_sleepMinutesRemaining != null && _sleepMinutesRemaining! > 0) {
@@ -198,14 +197,21 @@ class RadioService extends ChangeNotifier {
   }
 
   void cancelSleepTimer() {
-    _sleepTimer?.cancel(); _sleepCountdown?.cancel();
-    _sleepTimer = null; _sleepCountdown = null; _sleepMinutesRemaining = null;
+    _sleepTimer?.cancel();
+    _sleepCountdown?.cancel();
+    _sleepTimer = null;
+    _sleepCountdown = null;
+    _sleepMinutesRemaining = null;
   }
 
   Future<void> toggleFavorite(String stationId) async {
-    if (_favoriteIds.contains(stationId)) { _favoriteIds.remove(stationId); }
-    else { _favoriteIds.add(stationId); }
-    await _saveFavorites(); notifyListeners();
+    if (_favoriteIds.contains(stationId)) {
+      _favoriteIds.remove(stationId);
+    } else {
+      _favoriteIds.add(stationId);
+    }
+    await _saveFavorites();
+    notifyListeners();
   }
 
   Future<void> _loadFavorites() async {
